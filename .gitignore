@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Large local docs/presentations not required for code hosting
+group1 proposal final.pptx
+小组成员名单.xlsx
+
+# External reference codebase snapshot
+openpilot-master/

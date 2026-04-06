@@ -1,0 +1,36 @@
+AirPuff 离线热点切换命令
+
+热点参数
+SSID: AirPuff_AP
+密码: airpuff1234
+笔记本IP: 10.42.0.1
+树莓派IP: 10.42.0.2
+
+笔记本（Ubuntu）开启热点
+sudo nmcli con modify AirPuff_AP connection.interface-name wlp1s0
+sudo nmcli con up AirPuff_AP
+nmcli -t -f DEVICE,STATE,IP4.ADDRESS dev show wlp1s0
+
+若失败，先断开再重试
+sudo nmcli dev disconnect wlp1s0
+sudo nmcli con up AirPuff_AP
+
+树莓派切换到热点
+sudo nmcli con down netplan-wlan0-Xiaomi_8A54
+sudo nmcli con up AirPuff_AP
+ip -4 addr show wlan0
+ping -c 3 10.42.0.1
+
+运行时指向服务
+export AIRPUFF_SERVER_URL=http://10.42.0.1:5000/api/sense
+
+控制面板与SR界面
+http://10.42.0.1:5000/
+
+恢复到原路由（笔记本）
+sudo nmcli con down AirPuff_AP
+sudo nmcli con up Xiaomi_8A54_5G
+
+恢复到原路由（树莓派）
+sudo nmcli con down AirPuff_AP
+sudo nmcli con up netplan-wlan0-Xiaomi_8A54

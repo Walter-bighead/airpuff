@@ -688,16 +688,19 @@ HTML_DASHBOARD = """
                 let targetOffset = 0;
                 if (action === 'LEFT') targetOffset = -0.22;
                 if (action === 'RIGHT') targetOffset = 0.22;
+
                 const topX = cx + roadTopW * targetOffset;
-                const botX = cx + roadBotW * targetOffset;
+                const botX = cx;
                 const pathWTop = roadTopW * 0.08;
                 const pathWBot = roadBotW * 0.16;
+                const pathBendY = h * 0.52;
+
                 ctx.fillStyle = 'rgba(20,140,255,0.45)';
                 ctx.beginPath();
                 ctx.moveTo(botX - pathWBot / 2, roadBotY);
-                ctx.quadraticCurveTo(cx, h * 0.58, topX - pathWTop / 2, roadTopY + 10);
+                ctx.quadraticCurveTo(cx, pathBendY, topX - pathWTop / 2, roadTopY + 10);
                 ctx.lineTo(topX + pathWTop / 2, roadTopY + 10);
-                ctx.quadraticCurveTo(cx, h * 0.58, botX + pathWBot / 2, roadBotY);
+                ctx.quadraticCurveTo(cx, pathBendY, botX + pathWBot / 2, roadBotY);
                 ctx.closePath();
                 ctx.fill();
                 ctx.strokeStyle = 'rgba(90,190,255,0.9)';

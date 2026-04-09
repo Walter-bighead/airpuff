@@ -550,8 +550,8 @@ HTML_DASHBOARD = """
         .btn-green { background: #00b894; }
         .btn-red { background: #d63031; }
         .btn-blue { background: #0984e3; }
-        img { width: 100%; max-width: 400px; border-radius: 8px; border: 2px solid #555; }
-        canvas { width: 100%; max-width: 400px; border-radius: 8px; border: 2px solid #333; background: #0b0f14; }
+        img { width: 100%; max-width: 520px; border-radius: 8px; border: 2px solid #555; }
+        canvas { width: 100%; max-width: 520px; border-radius: 10px; border: 2px solid #333; background: #0b0f14; }
         .panel { background: #222; padding: 15px; border-radius: 12px; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
         .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; max-width: 300px; margin: 0 auto; }
         .log { text-align: left; font-family: monospace; font-size: 14px; color: #00f0ff; background: #000; padding: 10px; border-radius: 5px; height: 120px; overflow-y: auto; }
@@ -585,7 +585,7 @@ HTML_DASHBOARD = """
     </div>
 
     <div class="panel">
-        <canvas id="sr_canvas" width="400" height="260"></canvas>
+        <canvas id="sr_canvas" width="480" height="300"></canvas>
     </div>
 
     <div class="panel">
@@ -613,12 +613,40 @@ HTML_DASHBOARD = """
         }
         const srCanvas = document.getElementById('sr_canvas');
         const srCtx = srCanvas ? srCanvas.getContext('2d') : null;
+        const srSmooth = { left: 0, center: 0, right: 0, th: 1, bright: 0 };
         function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-        function drawSR(vd, action) {
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        function drawPill(ctx, x, y, text, color) {
+            ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+            const tw = ctx.measureText(text).width + 18;
+            ctx.fillStyle = 'rgba(4, 10, 20, 0.72)';
+            ctx.fillRect(x, y, tw, 20);
+            ctx.strokeStyle = 'rgba(120, 200, 255, 0.22)';
+            ctx.strokeRect(x, y, tw, 20);
+            ctx.fillStyle = color;
+            ctx.fillText(text, x + 9, y + 14);
+            return tw;
+        }
+        function drawSR(vd, action, mode) {
             if (!srCtx || !srCanvas) return;
             const ctx = srCtx;
             const w = srCanvas.width;
             const h = srCanvas.height;
+            const now = Date.now();
+
+            const thRaw = (vd && typeof vd.obstacle_th === 'number' && vd.obstacle_th > 0) ? vd.obstacle_th : 1;
+            const leftRaw = (vd && typeof vd.left_val === 'number') ? vd.left_val : 0;
+            const centerRaw = (vd && typeof vd.center_val === 'number') ? vd.center_val : 0;
+            const rightRaw = (vd && typeof vd.right_val === 'number') ? vd.right_val : 0;
+            const brightFrac = (vd && typeof vd.bright_frac === 'number') ? vd.bright_frac : 0;
+
+            srSmooth.th = lerp(srSmooth.th, thRaw, 0.22);
+            srSmooth.left = lerp(srSmooth.left, leftRaw, 0.32);
+            srSmooth.center = lerp(srSmooth.center, centerRaw, 0.32);
+            srSmooth.right = lerp(srSmooth.right, rightRaw, 0.32);
+            srSmooth.bright = lerp(srSmooth.bright, brightFrac, 0.2);
+
             const grad = ctx.createLinearGradient(0, 0, 0, h);
             grad.addColorStop(0, '#0b1118');
             grad.addColorStop(1, '#05070a');
@@ -643,56 +671,148 @@ HTML_DASHBOARD = """
             ctx.stroke();
             ctx.setLineDash([]);
 
-            const selfY = h - 26;
-            ctx.fillStyle = '#2d3436';
+            const sweep = (Math.sin(now * 0.005) + 1) * 0.5;
+            const sweepR = 56 + sweep * 42;
+            const scanActive = !!(vd && vd.scan_active);
+            const scanAlpha = scanActive ? 0.26 : 0.12;
+            ctx.fillStyle = `rgba(46, 230, 255, ${scanAlpha})`;
             ctx.beginPath();
-            ctx.moveTo(w / 2, selfY - 18);
-            ctx.lineTo(w / 2 - 14, selfY + 14);
-            ctx.lineTo(w / 2 + 14, selfY + 14);
+            ctx.moveTo(w / 2, h - 28);
+            ctx.arc(w / 2, h - 28, sweepR, -Math.PI * 0.88, -Math.PI * 0.12, false);
             ctx.closePath();
             ctx.fill();
-            ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+
+            function drawRenderEntity(laneX, val, rgb, laneBias) {
+                const th = Math.max(srSmooth.th, 0.001);
+                const intensity = clamp(val / th, 0, 1.8);
+                if (intensity < 0.05) return;
+
+                const closeness = clamp(intensity, 0, 1.4);
+                const baseY = h - 30;
+                const lift = 34 + closeness * 126;
+                const y = baseY - lift;
+                const r = 10 + closeness * 22;
+                const pulse = 0.82 + 0.18 * Math.sin(now * 0.009 + laneBias * 1.4);
+
+                ctx.fillStyle = `rgba(0, 0, 0, ${0.16 + closeness * 0.24})`;
+                ctx.beginPath();
+                ctx.ellipse(laneX, baseY - 2, r * 1.35, r * 0.42, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                const glow = ctx.createRadialGradient(laneX, y, r * 0.2, laneX, y, r * 2.5);
+                glow.addColorStop(0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${0.72 * pulse})`);
+                glow.addColorStop(0.42, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${0.30 * pulse})`);
+                glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                ctx.fillStyle = glow;
+                ctx.beginPath();
+                ctx.arc(laneX, y, r * 2.5, 0, Math.PI * 2);
+                ctx.fill();
+
+                const core = ctx.createRadialGradient(laneX - r * 0.24, y - r * 0.36, r * 0.2, laneX, y, r * 1.06);
+                core.addColorStop(0, `rgba(255, 255, 255, ${0.92 * pulse})`);
+                core.addColorStop(0.35, `rgba(${Math.min(255, rgb[0] + 48)}, ${Math.min(255, rgb[1] + 48)}, ${Math.min(255, rgb[2] + 48)}, ${0.85 * pulse})`);
+                core.addColorStop(1, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${0.28 + closeness * 0.4})`);
+                ctx.fillStyle = core;
+                ctx.beginPath();
+                ctx.arc(laneX, y, r, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = `rgba(255, 255, 255, ${0.25 + closeness * 0.35})`;
+                ctx.beginPath();
+                ctx.arc(laneX - r * 0.26, y - r * 0.28, r * 0.22, 0, Math.PI * 2);
+                ctx.fill();
+
+                const spin = now * 0.0014;
+                ctx.lineWidth = 1.15;
+                for (let i = 0; i < 3; i++) {
+                    const ringScale = 1.15 + i * 0.28;
+                    const alpha = 0.15 + closeness * 0.1 - i * 0.03;
+                    ctx.strokeStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${Math.max(0.04, alpha)})`;
+                    ctx.beginPath();
+                    ctx.ellipse(laneX, y + i * 1.2, r * ringScale, r * (0.26 + i * 0.04), laneBias * 0.2 + spin * (i % 2 ? 1 : -1), 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+
+                const tailAlpha = 0.12 + closeness * 0.22;
+                ctx.fillStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${tailAlpha})`;
+                ctx.beginPath();
+                ctx.moveTo(laneX - r * 0.22, y + r * 0.62);
+                ctx.quadraticCurveTo(laneX - r * 0.42, y + r * 1.5, laneX - r * 0.78, baseY - 2);
+                ctx.lineTo(laneX + r * 0.78, baseY - 2);
+                ctx.quadraticCurveTo(laneX + r * 0.42, y + r * 1.5, laneX + r * 0.22, y + r * 0.62);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            drawRenderEntity(w * 0.26, srSmooth.left, [92, 193, 255], -1);
+            drawRenderEntity(w * 0.50, srSmooth.center, [255, 125, 96], 0);
+            drawRenderEntity(w * 0.74, srSmooth.right, [120, 255, 175], 1);
+
+            const selfY = h - 24;
+            const shipPulse = 0.78 + 0.22 * Math.sin(now * 0.006);
+            const shipX = w / 2;
+
+            ctx.fillStyle = `rgba(30, 200, 255, ${0.18 * shipPulse})`;
+            ctx.beginPath();
+            ctx.ellipse(shipX, selfY + 4, 42, 11, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            const bodyGrad = ctx.createLinearGradient(shipX - 20, selfY - 12, shipX + 20, selfY + 12);
+            bodyGrad.addColorStop(0, '#d4f1ff');
+            bodyGrad.addColorStop(0.5, '#95d9ff');
+            bodyGrad.addColorStop(1, '#4ca2d8');
+            ctx.fillStyle = bodyGrad;
+            ctx.beginPath();
+            ctx.moveTo(shipX, selfY - 20);
+            ctx.quadraticCurveTo(shipX - 18, selfY - 4, shipX - 14, selfY + 10);
+            ctx.lineTo(shipX + 14, selfY + 10);
+            ctx.quadraticCurveTo(shipX + 18, selfY - 4, shipX, selfY - 20);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = 'rgba(90, 190, 255, 0.72)';
+            ctx.beginPath();
+            ctx.moveTo(shipX - 14, selfY + 2);
+            ctx.lineTo(shipX - 32, selfY + 14);
+            ctx.lineTo(shipX - 8, selfY + 10);
+            ctx.closePath();
+            ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(shipX + 14, selfY + 2);
+            ctx.lineTo(shipX + 32, selfY + 14);
+            ctx.lineTo(shipX + 8, selfY + 10);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+            ctx.beginPath();
+            ctx.arc(shipX, selfY - 8, 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.strokeStyle = 'rgba(46, 138, 200, 0.9)';
             ctx.stroke();
 
-            const th = (vd && typeof vd.obstacle_th === 'number' && vd.obstacle_th > 0) ? vd.obstacle_th : 1;
-            const leftVal = (vd && typeof vd.left_val === 'number') ? vd.left_val : 0;
-            const centerVal = (vd && typeof vd.center_val === 'number') ? vd.center_val : 0;
-            const rightVal = (vd && typeof vd.right_val === 'number') ? vd.right_val : 0;
-
-            function drawObstacle(x, val) {
-                const intensity = clamp(val / th, 0, 1.5);
-                if (intensity < 0.12) return;
-                const closeness = clamp(intensity, 0, 1);
-                const y = 40 + (1 - closeness) * (h * 0.45);
-                const size = 16 + closeness * 20;
-                const alpha = 0.25 + closeness * 0.55;
-                const g = Math.round(120 - 60 * closeness);
-                const b = Math.round(60 - 30 * closeness);
-                ctx.fillStyle = `rgba(255,${g},${b},${alpha})`;
-                ctx.fillRect(x - size / 2, y - size / 2, size, size * 0.8);
-                ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-                ctx.strokeRect(x - size / 2, y - size / 2, size, size * 0.8);
+            const scanText = scanActive ? ('SCAN ' + (vd.scan_dir || '...')) : 'SCAN OFF';
+            drawPill(ctx, 10, 10, scanText, scanActive ? '#62f6ff' : '#92b8d6');
+            const cmdText = 'CMD ' + (action || 'IDLE');
+            const cmdW = drawPill(ctx, w - 150, 10, cmdText, '#54d2ff');
+            if (cmdW > 146) {
+                ctx.clearRect(w - 150, 10, cmdW + 4, 20);
+                drawPill(ctx, w - cmdW - 12, 10, cmdText, '#54d2ff');
             }
 
-            drawObstacle(w * 0.28, leftVal);
-            drawObstacle(w * 0.50, centerVal);
-            drawObstacle(w * 0.72, rightVal);
-
-            if (vd && vd.scan_active) {
-                ctx.fillStyle = 'rgba(0,240,255,0.8)';
-                ctx.font = '12px monospace';
-                const dir = vd.scan_dir || '';
-                ctx.fillText(`SCAN ${dir}`, 10, 18);
-            }
-
-            if (action) {
-                ctx.fillStyle = 'rgba(0,180,255,0.8)';
-                ctx.font = '12px monospace';
-                ctx.fillText(`CMD ${action}`, w - 100, 18);
+            const metric = 'L ' + srSmooth.left.toFixed(2) + '  C ' + srSmooth.center.toFixed(2) + '  R ' + srSmooth.right.toFixed(2) + '  TH ' + srSmooth.th.toFixed(2);
+            drawPill(ctx, 10, h - 24, metric, '#9ad9ff');
+            if (srSmooth.bright > 0.2) {
+                drawPill(ctx, w - 148, h - 24, 'BRIGHT +' + (srSmooth.bright * 100).toFixed(0) + '%', '#ffc08c');
             }
         }
+
+        let stateBusy = false;
         setInterval(() => {
-            fetch('/api/state').then(r => r.json()).then(data => {
+            if (stateBusy) return;
+            stateBusy = true;
+            fetch('/api/state?ts=' + Date.now(), { cache: 'no-store' }).then(r => r.json()).then(data => {
                 document.getElementById('mode_label').innerText = data.mode;
                 document.getElementById('mode_label').style.color = data.mode === 'AUTO' ? '#00b894' : '#d63031';
                 document.getElementById('action').innerText = data.latest_action;
@@ -702,12 +822,12 @@ HTML_DASHBOARD = """
                 document.getElementById('llm_ms').innerText = data.last_llm_ms ?? '-';
                 document.getElementById('vlm_ms').innerText = data.last_vlm_ms ?? '-';
                 if (data.latest_image) {
-                    document.getElementById('video_feed').src = "data:image/jpeg;base64," + data.latest_image;
+                    document.getElementById('video_feed').src = 'data:image/jpeg;base64,' + data.latest_image;
                 }
                 document.getElementById('manual_controls').style.display = (data.mode === 'MANUAL') ? 'block' : 'none';
-                drawSR(data.vision_debug || {}, data.latest_action);
-            });
-        }, 500);
+                drawSR(data.vision_debug || {}, data.latest_action, data.mode);
+            }).catch(() => {}).finally(() => { stateBusy = false; });
+        }, 100);
     </script>
 </body>
 </html>

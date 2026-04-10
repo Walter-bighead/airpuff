@@ -1,0 +1,22 @@
+[Unit]
+Description=AirPuff Pi Camera Video Stream Uploader
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=walter
+WorkingDirectory=/home/walter/airpuff
+Environment=AIRPUFF_SENSE_URL=http://192.168.31.240:5000/api/sense
+Environment=STREAM_WIDTH=1280
+Environment=STREAM_HEIGHT=720
+Environment=CAM_FPS=20
+Environment=UPLOAD_FPS=8
+Environment=MJPEG_QUALITY=82
+ExecStart=/usr/bin/python3 /home/walter/airpuff/pi_video_stream_push.py
+Restart=always
+RestartSec=2
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

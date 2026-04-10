@@ -18,6 +18,7 @@ MODULES = [
     ("requests", "requests"),
     ("numpy", "numpy"),
     ("cv2", "opencv-python-headless"),
+    ("ultralytics", "ultralytics"),
     ("faster_whisper", "faster-whisper"),
 ]
 
@@ -72,6 +73,7 @@ def main():
     have_vision = have_base and all(
         modules[name].get("installed") and modules[name].get("import_ok", True) for name in ("numpy", "cv2")
     )
+    have_yolo = have_vision and modules["ultralytics"].get("installed") and modules["ultralytics"].get("import_ok", True)
     have_full_python = have_vision and modules["faster_whisper"].get("installed") and modules["faster_whisper"].get("import_ok", True)
 
     report = {
@@ -92,6 +94,7 @@ def main():
         "minimal_ready": have_base,
         "vision_lite_ready": have_vision,
         "vision_flow_ready": have_vision,
+        "vision_yolo_ready": have_yolo,
         "full_ready": have_full_python and report["ollama"].get("api_ok", False),
     }
 

@@ -24,6 +24,7 @@ install_with_retry "numpy" numpy
 install_with_retry "opencv" opencv-python-headless
 install_with_retry "torch-cpu" --index-url https://download.pytorch.org/whl/cpu torch torchvision
 install_with_retry "ultralytics" ultralytics
+install_with_retry "depth-anything" transformers timm safetensors huggingface_hub
 install_with_retry "faster-whisper" faster-whisper
 
 echo "[+] Running environment check"

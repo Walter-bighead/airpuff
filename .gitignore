@@ -10,11 +10,3 @@ group1 proposal final.pptx
 
 # External reference codebase snapshot
 openpilot-master/
-
-# Local debugging / generated artifacts
-.tmp/
-
-# Extracted third-party app packages and assets should stay local
-map_apps_from_adb/
-模型/
-SR_render_assets_HD_README.md

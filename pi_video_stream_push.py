@@ -6,7 +6,8 @@ import time
 
 import requests
 
-URL = os.getenv('AIRPUFF_SENSE_URL', 'http://192.168.31.240:5000/api/sense')
+CONTROL_BASE = os.getenv("AIRPUFF_CONTROL_BASE", "http://10.42.0.1:5000").rstrip("/")
+URL = os.getenv("AIRPUFF_SENSE_URL", f"{CONTROL_BASE}/api/sense")
 
 WIDTH = int(os.getenv('STREAM_WIDTH', '1280'))
 HEIGHT = int(os.getenv('STREAM_HEIGHT', '720'))

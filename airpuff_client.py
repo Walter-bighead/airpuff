@@ -26,7 +26,7 @@ try:
 except Exception:
     serial = None
 
-SERVER_URL = os.getenv("AIRPUFF_SERVER_URL", "http://192.168.31.240:5000/api/sense")
+SERVER_URL = os.getenv("AIRPUFF_SERVER_URL", "http://10.42.0.1:5000/api/sense")
 VALID_ACTIONS = {"FORWARD", "BACKWARD", "LEFT", "RIGHT", "STOP", "UP", "DOWN"}
 
 

@@ -3,6 +3,7 @@ import math
 import time
 import base64
 import json
+import re
 import pty
 import select
 import shlex
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, send_file
 
 try:
     from faster_whisper import WhisperModel
@@ -23,6 +24,19 @@ try:
     from ultralytics import YOLO
 except Exception:  # pragma: no cover - optional runtime dependency
     YOLO = None
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - optional runtime dependency
+    Image = None
+try:
+    import torch
+except Exception:  # pragma: no cover - optional runtime dependency
+    torch = None
+try:
+    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+except Exception:  # pragma: no cover - optional runtime dependency
+    AutoImageProcessor = None
+    AutoModelForDepthEstimation = None
 try:
     import cv2
     import numpy as np
@@ -94,16 +108,38 @@ CONFIG = {
     "FLOW_MAG_TH": env_float("AIRPUFF_FLOW_MAG_TH", 2.0),
     "FLOW_MIN_INTERVAL_MS": env_int("AIRPUFF_FLOW_MIN_INTERVAL_MS", 200),
     "YOLO_MODEL": os.getenv("AIRPUFF_YOLO_MODEL", "yolo11n.pt"),
-    "YOLO_IMGSZ": env_int("AIRPUFF_YOLO_IMGSZ", 640),
-    "YOLO_CONF": env_float("AIRPUFF_YOLO_CONF", 0.35),
-    "YOLO_MIN_INTERVAL_MS": env_int("AIRPUFF_YOLO_MIN_INTERVAL_MS", 180),
-    "YOLO_MAX_DETS": env_int("AIRPUFF_YOLO_MAX_DETS", 12),
+    "YOLO_IMGSZ": env_int("AIRPUFF_YOLO_IMGSZ", 512),
+    "YOLO_CONF": env_float("AIRPUFF_YOLO_CONF", 0.30),
+    "YOLO_MIN_INTERVAL_MS": env_int("AIRPUFF_YOLO_MIN_INTERVAL_MS", 120),
+    "YOLO_MAX_DETS": env_int("AIRPUFF_YOLO_MAX_DETS", 8),
+    "YOLO_BOX_HOLD_SEC": env_float("AIRPUFF_YOLO_BOX_HOLD_SEC", 0.45),
+    "YOLO_MISS_TOLERANCE": env_int("AIRPUFF_YOLO_MISS_TOLERANCE", 3),
     "YOLO_OBSTACLE_DIST_M": env_float("AIRPUFF_YOLO_OBSTACLE_DIST_M", 4.2),
     "YOLO_EMERGENCY_STOP_M": env_float("AIRPUFF_YOLO_EMERGENCY_STOP_M", 2.0),
     "YOLO_HFOV_DEG": env_float("AIRPUFF_YOLO_HFOV_DEG", 62.0),
     "YOLO_VFOV_DEG": env_float("AIRPUFF_YOLO_VFOV_DEG", 38.0),
     "YOLO_HARD_STOP_ON_CENTER": env_bool("AIRPUFF_YOLO_HARD_STOP_ON_CENTER", True),
     "YOLO_CENTER_STOP_OVERLAP": env_float("AIRPUFF_YOLO_CENTER_STOP_OVERLAP", 0.18),
+    "YOLO_OBSTACLE_CONF_MIN": env_float("AIRPUFF_YOLO_OBSTACLE_CONF_MIN", 0.42),
+    "YOLO_HIGH_CONF_BYPASS": env_float("AIRPUFF_YOLO_HIGH_CONF_BYPASS", 0.68),
+    "YOLO_CONFIRM_HITS": env_int("AIRPUFF_YOLO_CONFIRM_HITS", 2),
+    "YOLO_MAX_AREA_RATIO": env_float("AIRPUFF_YOLO_MAX_AREA_RATIO", 0.72),
+    "YOLO_EDGE_MARGIN": env_float("AIRPUFF_YOLO_EDGE_MARGIN", 0.02),
+    "YOLO_CENTER_ANCHOR_MIN": env_float("AIRPUFF_YOLO_CENTER_ANCHOR_MIN", 0.34),
+    "YOLO_CENTER_ANCHOR_MAX": env_float("AIRPUFF_YOLO_CENTER_ANCHOR_MAX", 0.66),
+    "DEPTH_ANYTHING_ENABLED": env_bool("AIRPUFF_DEPTH_ANYTHING_ENABLED", False),
+    "DEPTH_ANYTHING_MODEL": os.getenv(
+        "AIRPUFF_DEPTH_ANYTHING_MODEL",
+        "depth-anything/Depth-Anything-V2-Small-hf",
+    ),
+    "DEPTH_ANYTHING_DEVICE": os.getenv("AIRPUFF_DEPTH_ANYTHING_DEVICE", "").strip().lower(),
+    "DEPTH_ANYTHING_MIN_DISTANCE_M": env_float("AIRPUFF_DEPTH_ANYTHING_MIN_DISTANCE_M", 0.3),
+    "DEPTH_ANYTHING_MAX_DISTANCE_M": env_float("AIRPUFF_DEPTH_ANYTHING_MAX_DISTANCE_M", 25.0),
+    "DEPTH_ANYTHING_SCALE_SMOOTHING": env_float("AIRPUFF_DEPTH_ANYTHING_SCALE_SMOOTHING", 0.35),
+    "DEPTH_ANYTHING_ROI_X_MARGIN": env_float("AIRPUFF_DEPTH_ANYTHING_ROI_X_MARGIN", 0.18),
+    "DEPTH_ANYTHING_ROI_Y_TOP": env_float("AIRPUFF_DEPTH_ANYTHING_ROI_Y_TOP", 0.38),
+    "DEPTH_ANYTHING_ROI_Y_BOTTOM": env_float("AIRPUFF_DEPTH_ANYTHING_ROI_Y_BOTTOM", 0.95),
+    "DEPTH_ANYTHING_TRIM_FRAC": env_float("AIRPUFF_DEPTH_ANYTHING_TRIM_FRAC", 0.1),
     "YOLO_OBSTACLE_LABELS": env_csv(
         "AIRPUFF_YOLO_OBSTACLE_LABELS",
         (
@@ -111,18 +147,33 @@ CONFIG = {
             "backpack,suitcase,bottle,cup,remote,cell_phone,teddy_bear,book,laptop,keyboard,mouse"
         ),
     ),
+    "YOLO_OCCUPANCY_STOP_AREA_RATIO": env_float("AIRPUFF_YOLO_OCCUPANCY_STOP_AREA_RATIO", 0.055),
+    "YOLO_APPROACH_ENABLED": env_bool("AIRPUFF_YOLO_APPROACH_ENABLED", True),
+    "YOLO_APPROACH_IOU_MIN": env_float("AIRPUFF_YOLO_APPROACH_IOU_MIN", 0.2),
+    "YOLO_APPROACH_WINDOW_SEC": env_float("AIRPUFF_YOLO_APPROACH_WINDOW_SEC", 1.2),
+    "YOLO_APPROACH_GROWTH_RATIO": env_float("AIRPUFF_YOLO_APPROACH_GROWTH_RATIO", 1.18),
+    "YOLO_APPROACH_GROWTH_DELTA": env_float("AIRPUFF_YOLO_APPROACH_GROWTH_DELTA", 0.008),
+    "YOLO_APPROACH_CENTER_OVERLAP": env_float("AIRPUFF_YOLO_APPROACH_CENTER_OVERLAP", 0.16),
+    "YOLO_FLOW_FALLBACK": env_bool("AIRPUFF_YOLO_FLOW_FALLBACK", True),
     "VISION_SCAN_ENABLED": env_bool("AIRPUFF_VISION_SCAN", True),
+    "VISION_DET_SYNC_MAX_LAG_SEC": env_float("AIRPUFF_VISION_DET_SYNC_MAX_LAG_SEC", 0.75),
     "VISION_SCAN_DURATION_MS": env_int("AIRPUFF_SCAN_DURATION_MS", 1200),
     "VISION_SCAN_STEP_MS": env_int("AIRPUFF_SCAN_STEP_MS", 300),
     "VISION_DIFF_TH": env_float("AIRPUFF_VISION_DIFF_TH", 0.03),
     "VISION_TURN_HOLD_MS": env_int("AIRPUFF_TURN_HOLD_MS", 600),
     "OLLAMA_NUM_PREDICT": env_int("AIRPUFF_NUM_PREDICT", 16),
     "ENABLE_KEYWORD_FALLBACK": env_bool("AIRPUFF_KEYWORD_FALLBACK", True),
+    "VOICE_WAKE_ENABLED": env_bool("AIRPUFF_VOICE_WAKE_ENABLED", True),
+    "VOICE_WAKE_WORDS_RAW": os.getenv(
+        "AIRPUFF_VOICE_WAKE_WORDS",
+        "你好飞艇,飞艇飞艇,飞艇,hello airpuff,hi airpuff",
+    ),
     "AUTOPILOT_IDLE_SEC": env_int("AIRPUFF_AUTOPILOT_IDLE_SEC", 5),
     "AUTOPILOT_MODE": os.getenv("AIRPUFF_AUTOPILOT_MODE", "wander"),  # wander | circle | off
     "AUTOPILOT_STEP_SEC": env_int("AIRPUFF_AUTOPILOT_STEP_SEC", 2),
     "AUTOPILOT_FORWARD_STEPS": env_int("AIRPUFF_AUTOPILOT_FORWARD_STEPS", 5),
     "AUTOPILOT_TURN_ACTION": os.getenv("AIRPUFF_AUTOPILOT_TURN_ACTION", "RIGHT"),
+    "STOP_CONDITION": os.getenv("AIRPUFF_STOP_CONDITION", "A").strip().upper() or "A",
     "CHAT_HISTORY_MAX": env_int("AIRPUFF_CHAT_HISTORY_MAX", 6),
     "CHAT_NUM_PREDICT": env_int("AIRPUFF_CHAT_NUM_PREDICT", 48),
     "LOG_PATH": os.getenv("AIRPUFF_LOG_PATH", ""),
@@ -142,6 +193,20 @@ CONFIG = {
     "SERVER_PORT": env_int("AIRPUFF_PORT", 5000),
 }
 
+if CONFIG["STOP_CONDITION"] not in {"A"}:
+    CONFIG["STOP_CONDITION"] = "A"
+
+if not CONFIG["DEPTH_ANYTHING_DEVICE"]:
+    CONFIG["DEPTH_ANYTHING_DEVICE"] = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
+
+CONFIG["VOICE_WAKE_WORDS"] = [
+    item.strip()
+    for item in str(CONFIG["VOICE_WAKE_WORDS_RAW"]).split(",")
+    if item.strip()
+]
+if not CONFIG["VOICE_WAKE_WORDS"]:
+    CONFIG["VOICE_WAKE_WORDS"] = ["你好飞艇", "飞艇飞艇", "飞艇", "hello airpuff", "hi airpuff"]
+
 
 state_lock = threading.Lock()
 state: Dict[str, Any] = {
@@ -156,6 +221,9 @@ state: Dict[str, Any] = {
     "last_asr_ms": None,
     "last_llm_ms": None,
     "last_vlm_ms": None,
+    "latest_wake_hit": False,
+    "latest_wake_word": "",
+    "latest_wake_required": False,
     "last_route": "",
     "last_error": "",
     "last_input_ts": time.time(),
@@ -200,6 +268,19 @@ vision_state: Dict[str, Any] = {
     "last_right_val": None,
     "last_nearest_distance_m": None,
     "last_detections": [],
+    "last_detections_held": False,
+    "last_depth_scale_m_per_unit": None,
+    "last_depth_runtime": "",
+    "last_yolo_fallback_used": False,
+    "last_yolo_fallback_reason": "",
+    "last_approach_hit": False,
+    "last_approach_reason": "",
+    "last_obstacle_tracks": [],
+    "yolo_empty_streak": 0,
+    "last_nonempty_detections": [],
+    "last_nonempty_detection_server_ts": 0.0,
+    "last_detection_image_ts": 0.0,
+    "last_detection_server_ts": 0.0,
     "last_lane_markings_visible": False,
     "last_front_blocked": False,
     "last_emergency_stop": False,
@@ -207,6 +288,8 @@ vision_state: Dict[str, Any] = {
     "last_stop_reason": "",
     "detector_ready": False,
     "detector_error": "",
+    "depth_ready": False,
+    "depth_error": "",
     "last_vision_ts": 0.0,
 }
 
@@ -473,6 +556,16 @@ def build_vision_debug(vision_action: str = "", vision_route: str = "") -> Dict[
         "right_val": vision_state.get("last_right_val"),
         "nearest_distance_m": vision_state.get("last_nearest_distance_m"),
         "detections": vision_state.get("last_detections", []),
+        "detections_held": vision_state.get("last_detections_held", False),
+        "depth_scale_m_per_unit": vision_state.get("last_depth_scale_m_per_unit"),
+        "depth_runtime": vision_state.get("last_depth_runtime"),
+        "fallback_used": vision_state.get("last_yolo_fallback_used", False),
+        "fallback_reason": vision_state.get("last_yolo_fallback_reason", ""),
+        "approach_hit": vision_state.get("last_approach_hit", False),
+        "approach_reason": vision_state.get("last_approach_reason", ""),
+        "yolo_empty_streak": vision_state.get("yolo_empty_streak", 0),
+        "detections_image_ts": vision_state.get("last_detection_image_ts"),
+        "detections_server_ts": vision_state.get("last_detection_server_ts"),
         "lane_markings_visible": vision_state.get("last_lane_markings_visible"),
         "front_blocked": vision_state.get("last_front_blocked"),
         "emergency_stop": vision_state.get("last_emergency_stop"),
@@ -481,6 +574,8 @@ def build_vision_debug(vision_action: str = "", vision_route: str = "") -> Dict[
         "stop_reason": vision_state.get("last_stop_reason"),
         "detector_ready": vision_state.get("detector_ready"),
         "detector_error": vision_state.get("detector_error"),
+        "depth_ready": vision_state.get("depth_ready"),
+        "depth_error": vision_state.get("depth_error"),
         "vision_ts": vision_state.get("last_vision_ts"),
         "scan_active": vision_state.get("scan_active"),
         "scan_dir": vision_state.get("scan_dir"),
@@ -511,11 +606,25 @@ def _clear_vision_runtime() -> None:
     vision_state["last_right_val"] = None
     vision_state["last_nearest_distance_m"] = None
     vision_state["last_detections"] = []
+    vision_state["last_detections_held"] = False
+    vision_state["last_depth_scale_m_per_unit"] = None
+    vision_state["last_depth_runtime"] = ""
+    vision_state["last_yolo_fallback_used"] = False
+    vision_state["last_yolo_fallback_reason"] = ""
+    vision_state["last_approach_hit"] = False
+    vision_state["last_approach_reason"] = ""
+    vision_state["last_obstacle_tracks"] = []
+    vision_state["yolo_empty_streak"] = 0
+    vision_state["last_nonempty_detections"] = []
+    vision_state["last_nonempty_detection_server_ts"] = 0.0
+    vision_state["last_detection_image_ts"] = 0.0
+    vision_state["last_detection_server_ts"] = 0.0
     vision_state["last_lane_markings_visible"] = False
     vision_state["last_front_blocked"] = False
     vision_state["last_emergency_stop"] = False
     vision_state["last_emergency_distance_m"] = None
     vision_state["last_stop_reason"] = ""
+    vision_state["depth_error"] = ""
     vision_state["last_vision_ts"] = 0.0
     with state_lock:
         state["latest_image"] = ""
@@ -774,6 +883,10 @@ def _load_bgr_image(image_b64: str) -> Optional["np.ndarray"]:
         return None
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 def _focal_px(span_px: float, fov_deg: float) -> float:
     safe_fov = max(1.0, min(float(fov_deg), 179.0))
     return float(span_px) / (2.0 * math.tan(math.radians(safe_fov) / 2.0))
@@ -833,8 +946,19 @@ def _prepare_yolo_detection(
             round(x2 / img_w, 4),
             round(y2 / img_h, 4),
         ],
+        "box_px": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+        "box_size_px": {"w": round(box_w, 1), "h": round(box_h, 1)},
+        "area_ratio": round((box_w * box_h) / max(float(img_w * img_h), 1.0), 5),
+        "center_x": round(((x1 + x2) * 0.5) / max(float(img_w), 1.0), 4),
+        "bottom_y": round(y2 / max(float(img_h), 1.0), 4),
+        "image_size": [int(img_w), int(img_h)],
         "distance_m": round(float(dist_m), 2) if dist_m is not None else None,
+        "distance_geom_m": round(float(dist_m), 2) if dist_m is not None else None,
         "approx_distance": dist_m is not None,
+        "depth_rel": None,
+        "distance_source": "yolo_size_prior" if dist_m is not None else "",
+        "stable_hits": 1,
+        "actionable": False,
         "lane": lane,
         "lane_scores": {key: round(val, 3) for key, val in lane_spans.items()},
         "render_kind": render_kind,
@@ -845,20 +969,293 @@ def _prepare_yolo_detection(
     }
 
 
+def _update_detection_threat(det: Dict[str, Any]) -> None:
+    box_size = det.get("box_size_px") or {}
+    image_size = det.get("image_size") or [1, 1]
+    try:
+        box_w = max(1.0, float(box_size.get("w", 1.0)))
+        box_h = max(1.0, float(box_size.get("h", 1.0)))
+        img_w = max(1.0, float(image_size[0]))
+        img_h = max(1.0, float(image_size[1]))
+    except Exception:
+        return
+    dist_m = det.get("distance_m")
+    depth_term = 1.0 / max(float(dist_m), 0.4) if isinstance(dist_m, (int, float)) else 1.0 / 8.0
+    area_ratio = (box_w * box_h) / max(img_w * img_h, 1.0)
+    det["threat"] = round(float(det.get("conf", 0.0)) * depth_term * (0.75 + area_ratio * 3.0), 4)
+
+
+def _box_iou(box_a: List[float], box_b: List[float]) -> float:
+    if len(box_a) != 4 or len(box_b) != 4:
+        return 0.0
+    ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
+    bx1, by1, bx2, by2 = [float(v) for v in box_b]
+    inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    area_a = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1.0, (bx2 - bx1) * (by2 - by1))
+    return inter / max(1.0, area_a + area_b - inter)
+
+
+def _match_previous_obstacle_track(det: Dict[str, Any], now: float) -> Optional[Dict[str, Any]]:
+    tracks = vision_state.get("last_obstacle_tracks") or []
+    best_track = None
+    best_iou = 0.0
+    window_sec = max(0.2, float(CONFIG["YOLO_APPROACH_WINDOW_SEC"]))
+    label = str(det.get("label") or "")
+    for track in tracks:
+        if str(track.get("label") or "") != label:
+            continue
+        ts = float(track.get("ts") or 0.0)
+        if now - ts > window_sec:
+            continue
+        iou = _box_iou(det.get("box_px") or [], track.get("box_px") or [])
+        if iou >= max(float(CONFIG["YOLO_APPROACH_IOU_MIN"]), best_iou):
+            best_track = track
+            best_iou = iou
+    return best_track
+
+
+def _is_plausible_obstacle_detection(det: Dict[str, Any]) -> bool:
+    conf = float(det.get("conf") or 0.0)
+    if conf < float(CONFIG["YOLO_OBSTACLE_CONF_MIN"]):
+        return False
+    area_ratio = float(det.get("area_ratio") or 0.0)
+    if area_ratio > float(CONFIG["YOLO_MAX_AREA_RATIO"]):
+        return False
+    edge_margin = float(CONFIG["YOLO_EDGE_MARGIN"])
+    x1, y1, x2, y2 = [float(v) for v in (det.get("box") or [0.0, 0.0, 1.0, 1.0])]
+    touches_edge = (
+        x1 <= edge_margin
+        or y1 <= edge_margin
+        or x2 >= (1.0 - edge_margin)
+        or y2 >= (1.0 - edge_margin)
+    )
+    # Reject giant border-hugging boxes, which are often full-frame hallucinations.
+    if touches_edge and area_ratio >= 0.45 and conf < max(float(CONFIG["YOLO_HIGH_CONF_BYPASS"]), 0.75):
+        return False
+    return True
+
+
+def _is_actionable_obstacle(det: Dict[str, Any]) -> bool:
+    if not det.get("is_obstacle"):
+        return False
+    if not _is_plausible_obstacle_detection(det):
+        return False
+    conf = float(det.get("conf") or 0.0)
+    hits = int(det.get("stable_hits") or 0)
+    return conf >= float(CONFIG["YOLO_HIGH_CONF_BYPASS"]) or hits >= int(CONFIG["YOLO_CONFIRM_HITS"])
+
+
+def _is_center_stop_candidate(det: Dict[str, Any]) -> bool:
+    if not _is_actionable_obstacle(det):
+        return False
+    center_x = float(det.get("center_x") or 0.0)
+    if not (float(CONFIG["YOLO_CENTER_ANCHOR_MIN"]) <= center_x <= float(CONFIG["YOLO_CENTER_ANCHOR_MAX"])):
+        return False
+    center_overlap = float((det.get("lane_scores") or {}).get("CENTER", 0.0) or 0.0)
+    return center_overlap >= max(0.08, float(CONFIG["YOLO_CENTER_STOP_OVERLAP"]))
+
+
+def _annotate_yolo_stability(detections: List[Dict[str, Any]], now: float) -> None:
+    for det in detections:
+        prev_track = _match_previous_obstacle_track(det, now)
+        hits = 1
+        if prev_track:
+            hits = int(prev_track.get("hits") or 0) + 1
+        det["stable_hits"] = hits
+        det["actionable"] = _is_actionable_obstacle(det)
+
+
+def _annotate_yolo_approach(detections: List[Dict[str, Any]], now: float) -> Optional[Dict[str, Any]]:
+    if not CONFIG["YOLO_APPROACH_ENABLED"]:
+        return None
+    approach_hit = None
+    for det in detections:
+        det["approaching"] = False
+        det["approach_ratio"] = None
+        det["approach_dt_ms"] = None
+        if not _is_actionable_obstacle(det):
+            continue
+        center_overlap = float((det.get("lane_scores") or {}).get("CENTER", 0.0) or 0.0)
+        if center_overlap < float(CONFIG["YOLO_APPROACH_CENTER_OVERLAP"]):
+            continue
+        prev_track = _match_previous_obstacle_track(det, now)
+        if not prev_track:
+            continue
+        prev_area = float(prev_track.get("area_ratio") or 0.0)
+        curr_area = float(det.get("area_ratio") or 0.0)
+        dt_ms = max(1.0, (now - float(prev_track.get("ts") or now)) * 1000.0)
+        if prev_area <= 0.0 or curr_area <= prev_area:
+            continue
+        growth_ratio = curr_area / max(prev_area, 1e-6)
+        growth_delta = curr_area - prev_area
+        det["approach_ratio"] = round(growth_ratio, 3)
+        det["approach_dt_ms"] = int(round(dt_ms))
+        if (
+            growth_ratio >= float(CONFIG["YOLO_APPROACH_GROWTH_RATIO"])
+            and growth_delta >= float(CONFIG["YOLO_APPROACH_GROWTH_DELTA"])
+        ):
+            det["approaching"] = True
+            if approach_hit is None or curr_area > float(approach_hit.get("area_ratio") or 0.0):
+                approach_hit = det
+    return approach_hit
+
+
+def _remember_obstacle_tracks(detections: List[Dict[str, Any]], now: float) -> None:
+    tracks: List[Dict[str, Any]] = []
+    for det in detections:
+        if not det.get("is_obstacle"):
+            continue
+        tracks.append(
+            {
+                "label": det.get("label"),
+                "box_px": list(det.get("box_px") or []),
+                "area_ratio": float(det.get("area_ratio") or 0.0),
+                "hits": int(det.get("stable_hits") or 1),
+                "ts": float(now),
+            }
+        )
+    vision_state["last_obstacle_tracks"] = tracks
+
+
+def _depth_anything_available() -> bool:
+    return bool(
+        CONFIG["DEPTH_ANYTHING_ENABLED"]
+        and torch is not None
+        and Image is not None
+        and AutoImageProcessor is not None
+        and AutoModelForDepthEstimation is not None
+        and depth_model is not None
+        and depth_processor is not None
+    )
+
+
+def _predict_depth_map(img: "np.ndarray") -> Tuple[Optional["np.ndarray"], str]:
+    if cv2 is None or np is None:
+        return None, "opencv_missing"
+    if not _depth_anything_available():
+        return None, depth_error or "depth_anything_unavailable"
+    try:
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb)
+        inputs = depth_processor(images=pil_img, return_tensors="pt")
+        device = str(CONFIG["DEPTH_ANYTHING_DEVICE"] or "cpu")
+        if device != "cpu":
+            inputs = {key: value.to(device) for key, value in inputs.items()}
+        with torch.no_grad():
+            outputs = depth_model(**inputs)
+        processed = depth_processor.post_process_depth_estimation(
+            outputs,
+            target_sizes=[(img.shape[0], img.shape[1])],
+        )
+        depth = processed[0]["predicted_depth"]
+        if hasattr(depth, "detach"):
+            depth = depth.detach().float().cpu().numpy()
+        depth_arr = np.asarray(depth, dtype=np.float32)
+        if depth_arr.ndim != 2:
+            return None, "depth_map_invalid"
+        return depth_arr, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _trimmed_median(values: "np.ndarray", trim_frac: float) -> Optional[float]:
+    if np is None:
+        return None
+    flat = np.asarray(values, dtype=np.float32).reshape(-1)
+    flat = flat[np.isfinite(flat)]
+    flat = flat[flat > 0]
+    if flat.size == 0:
+        return None
+    flat.sort()
+    trim = int(flat.size * _clamp(float(trim_frac), 0.0, 0.45))
+    if trim > 0 and (trim * 2) < flat.size:
+        flat = flat[trim : flat.size - trim]
+    return float(np.median(flat)) if flat.size else None
+
+
+def _depth_roi_value(depth_map: "np.ndarray", box_px: List[float]) -> Optional[float]:
+    if np is None or len(box_px) != 4:
+        return None
+    img_h, img_w = depth_map.shape[:2]
+    x1, y1, x2, y2 = [float(v) for v in box_px]
+    box_w = max(2.0, x2 - x1)
+    box_h = max(2.0, y2 - y1)
+    x_margin = box_w * _clamp(float(CONFIG["DEPTH_ANYTHING_ROI_X_MARGIN"]), 0.0, 0.45)
+    y0 = y1 + box_h * _clamp(float(CONFIG["DEPTH_ANYTHING_ROI_Y_TOP"]), 0.0, 0.95)
+    y1_roi = y1 + box_h * _clamp(float(CONFIG["DEPTH_ANYTHING_ROI_Y_BOTTOM"]), 0.05, 1.0)
+    rx1 = int(_clamp(math.floor(x1 + x_margin), 0, max(0, img_w - 1)))
+    rx2 = int(_clamp(math.ceil(x2 - x_margin), rx1 + 1, img_w))
+    ry1 = int(_clamp(math.floor(y0), 0, max(0, img_h - 1)))
+    ry2 = int(_clamp(math.ceil(y1_roi), ry1 + 1, img_h))
+    roi = depth_map[ry1:ry2, rx1:rx2]
+    if roi.size == 0:
+        return None
+    return _trimmed_median(roi, float(CONFIG["DEPTH_ANYTHING_TRIM_FRAC"]))
+
+
+def _apply_depth_anything_distances(detections: List[Dict[str, Any]], depth_map: "np.ndarray") -> Optional[float]:
+    scale_candidates: List[float] = []
+    for det in detections:
+        rel_depth = _depth_roi_value(depth_map, det.get("box_px") or [])
+        det["depth_rel"] = round(float(rel_depth), 4) if rel_depth is not None else None
+        geom_dist = det.get("distance_geom_m")
+        if rel_depth is not None and isinstance(geom_dist, (int, float)) and rel_depth > 0:
+            scale_candidates.append(float(geom_dist) / float(rel_depth))
+
+    scale = None
+    if scale_candidates:
+        scale_candidates.sort()
+        mid = len(scale_candidates) // 2
+        if len(scale_candidates) % 2:
+            scale = scale_candidates[mid]
+        else:
+            scale = (scale_candidates[mid - 1] + scale_candidates[mid]) / 2.0
+        prev_scale = vision_state.get("last_depth_scale_m_per_unit")
+        if isinstance(prev_scale, (int, float)):
+            alpha = _clamp(float(CONFIG["DEPTH_ANYTHING_SCALE_SMOOTHING"]), 0.0, 1.0)
+            scale = (float(prev_scale) * (1.0 - alpha)) + (float(scale) * alpha)
+    else:
+        prev_scale = vision_state.get("last_depth_scale_m_per_unit")
+        if isinstance(prev_scale, (int, float)):
+            scale = float(prev_scale)
+
+    for det in detections:
+        rel_depth = det.get("depth_rel")
+        if isinstance(rel_depth, (int, float)) and isinstance(scale, (int, float)):
+            dist_m = float(rel_depth) * float(scale)
+            dist_m = _clamp(
+                dist_m,
+                float(CONFIG["DEPTH_ANYTHING_MIN_DISTANCE_M"]),
+                float(CONFIG["DEPTH_ANYTHING_MAX_DISTANCE_M"]),
+            )
+            det["distance_m"] = round(float(dist_m), 2)
+            det["approx_distance"] = True
+            det["distance_source"] = "depth_anything_v2_scaled"
+        elif isinstance(det.get("distance_geom_m"), (int, float)):
+            det["distance_m"] = round(float(det["distance_geom_m"]), 2)
+            det["approx_distance"] = True
+            det["distance_source"] = "yolo_size_prior"
+        elif isinstance(rel_depth, (int, float)):
+            det["distance_source"] = "depth_anything_v2_relative"
+        _update_detection_threat(det)
+
+    return float(scale) if isinstance(scale, (int, float)) else None
+
+
 def _yolo_front_blocking_detection(
     detections: List[Dict[str, Any]],
     max_distance_m: Optional[float] = None,
     require_distance: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    min_overlap = max(0.05, float(CONFIG["YOLO_CENTER_STOP_OVERLAP"]))
     center_candidates: List[Dict[str, Any]] = []
 
     for det in detections:
-        if not det.get("is_obstacle"):
-            continue
-        lane_scores = det.get("lane_scores") or {}
-        center_overlap = float(lane_scores.get("CENTER", 0.0) or 0.0)
-        if center_overlap < min_overlap:
+        if not _is_center_stop_candidate(det):
             continue
         center_candidates.append(det)
 
@@ -967,6 +1364,53 @@ def keyword_command(transcript: str) -> str:
         if any(k in text for k in keywords):
             return cmd
     return ""
+
+
+def _wake_match_pattern(wake_word: str) -> str:
+    token = str(wake_word or "").strip().lower()
+    if not token:
+        return ""
+    # Allow flexible separators between words, e.g. "hello, airpuff".
+    return re.escape(token).replace(r"\ ", r"[\s,，。.!！？:：;；\-_~]*")
+
+
+def apply_voice_wake_gate(transcript: str, from_audio: bool) -> Tuple[str, Dict[str, Any]]:
+    text = str(transcript or "").strip()
+    info: Dict[str, Any] = {
+        "required": bool(CONFIG["VOICE_WAKE_ENABLED"] and from_audio),
+        "hit": False,
+        "word": "",
+        "prompt_only": False,
+    }
+    if not text:
+        return "", info
+    if not info["required"]:
+        return text, info
+
+    text_lower = text.lower()
+    best = None
+    for wake_word in CONFIG["VOICE_WAKE_WORDS"]:
+        pattern = _wake_match_pattern(wake_word)
+        if not pattern:
+            continue
+        match = re.search(pattern, text_lower)
+        if not match:
+            continue
+        candidate = (match.start(), -(match.end() - match.start()), wake_word, match.end())
+        if best is None or candidate < best:
+            best = candidate
+
+    if best is None:
+        return "", info
+
+    _, _, hit_word, end_pos = best
+    info["hit"] = True
+    info["word"] = hit_word
+    suffix = re.sub(r"^[\s,，。.!！？:：;；\-_~]+", "", text[end_pos:]).strip()
+    if not suffix:
+        info["prompt_only"] = True
+        return "", info
+    return suffix, info
 
 
 def fast_command_candidate(transcript: str) -> str:
@@ -1171,7 +1615,7 @@ def flow_vision_action(image_b64: str) -> str:
         return ""
 
 
-def yolo_vision_action(image_b64: str) -> str:
+def yolo_vision_action(image_b64: str, frame_ts: Optional[float] = None) -> str:
     if cv2 is None or np is None or not image_b64:
         vision_state["detector_ready"] = False
         vision_state["detector_error"] = "opencv_missing"
@@ -1181,6 +1625,10 @@ def yolo_vision_action(image_b64: str) -> str:
         vision_state["detector_error"] = yolo_error or "ultralytics_missing"
         return ""
     try:
+        vision_state["last_yolo_fallback_used"] = False
+        vision_state["last_yolo_fallback_reason"] = ""
+        vision_state["last_approach_hit"] = False
+        vision_state["last_approach_reason"] = ""
         img = _load_bgr_image(image_b64)
         if img is None:
             return ""
@@ -1195,10 +1643,7 @@ def yolo_vision_action(image_b64: str) -> str:
         names = getattr(result, "names", {}) or getattr(yolo_model, "names", {}) or {}
         boxes = getattr(result, "boxes", None)
         detections: List[Dict[str, Any]] = []
-        lane_scores = {"LEFT": 0.0, "CENTER": 0.0, "RIGHT": 0.0}
-        lane_markings_visible = False
         obstacle_labels = set(CONFIG["YOLO_OBSTACLE_LABELS"])
-        nearest_distance = None
 
         if boxes is not None:
             xyxy_rows = boxes.xyxy.tolist()
@@ -1209,16 +1654,21 @@ def yolo_vision_action(image_b64: str) -> str:
                 label = _normalize_label(names.get(int(cls_idx), str(int(cls_idx))))
                 det = _prepare_yolo_detection(label, float(conf), x1, y1, x2, y2, img_w, img_h)
                 det["is_lane_marker"] = _is_lane_like_label(label)
-                if det["is_lane_marker"]:
-                    lane_markings_visible = True
                 det["is_obstacle"] = label in obstacle_labels
-                if det["is_obstacle"]:
-                    for lane, overlap in det["lane_scores"].items():
-                        lane_scores[lane] = max(lane_scores[lane], float(det["threat"]) * float(overlap))
-                    dist_m = det.get("distance_m")
-                    if dist_m is not None:
-                        nearest_distance = dist_m if nearest_distance is None else min(nearest_distance, dist_m)
                 detections.append(det)
+
+        depth_runtime = ""
+        depth_scale = None
+        if detections:
+            depth_map, depth_runtime = _predict_depth_map(img)
+            if depth_map is not None:
+                depth_scale = _apply_depth_anything_distances(detections, depth_map)
+                vision_state["depth_ready"] = True
+                vision_state["depth_error"] = ""
+            else:
+                vision_state["depth_error"] = depth_runtime
+        vision_state["last_depth_runtime"] = "depth_anything_v2" if depth_scale is not None else ""
+        vision_state["last_depth_scale_m_per_unit"] = round(float(depth_scale), 4) if depth_scale is not None else None
 
         detections.sort(
             key=lambda item: (
@@ -1228,6 +1678,58 @@ def yolo_vision_action(image_b64: str) -> str:
             )
         )
         detections = detections[: CONFIG["YOLO_MAX_DETS"]]
+        detect_now = time.time()
+        _annotate_yolo_stability(detections, detect_now)
+        approach_det = _annotate_yolo_approach(detections, detect_now)
+        detections_held = False
+        raw_detections = detections
+        if raw_detections:
+            vision_state["yolo_empty_streak"] = 0
+            vision_state["last_nonempty_detections"] = [dict(det) for det in raw_detections]
+            vision_state["last_nonempty_detection_server_ts"] = detect_now
+        else:
+            empty_streak = int(vision_state.get("yolo_empty_streak") or 0) + 1
+            vision_state["yolo_empty_streak"] = empty_streak
+            hold_sec = max(0.0, float(CONFIG["YOLO_BOX_HOLD_SEC"]))
+            miss_tol = max(0, int(CONFIG["YOLO_MISS_TOLERANCE"]))
+            last_nonempty = vision_state.get("last_nonempty_detections") or []
+            last_nonempty_ts = float(vision_state.get("last_nonempty_detection_server_ts") or 0.0)
+            if last_nonempty and empty_streak <= miss_tol and (detect_now - last_nonempty_ts) <= hold_sec:
+                detections = [dict(det) for det in last_nonempty]
+                for det in detections:
+                    det["held"] = True
+                detections_held = True
+
+        # Recompute aggregate values from the final detection list (raw or held).
+        lane_scores = {"LEFT": 0.0, "CENTER": 0.0, "RIGHT": 0.0}
+        lane_markings_visible = False
+        nearest_distance = None
+        center_occupancy_det = None
+        for det in detections:
+            if det.get("is_lane_marker"):
+                lane_markings_visible = True
+            if not _is_actionable_obstacle(det):
+                continue
+            center_overlap = float((det.get("lane_scores") or {}).get("CENTER", 0.0) or 0.0)
+            area_ratio = float(det.get("area_ratio") or 0.0)
+            if (
+                _is_center_stop_candidate(det)
+                and area_ratio >= float(CONFIG["YOLO_OCCUPANCY_STOP_AREA_RATIO"])
+            ):
+                if center_occupancy_det is None or area_ratio > float(center_occupancy_det.get("area_ratio") or 0.0):
+                    center_occupancy_det = det
+            for lane, overlap in (det.get("lane_scores") or {}).items():
+                if lane not in lane_scores:
+                    continue
+                try:
+                    lane_scores[lane] = max(lane_scores[lane], float(det.get("threat", 0.0)) * float(overlap))
+                except Exception:
+                    continue
+            dist_m = det.get("distance_m")
+            if isinstance(dist_m, (int, float)):
+                dist_val = float(dist_m)
+                nearest_distance = dist_val if nearest_distance is None else min(nearest_distance, dist_val)
+        _remember_obstacle_tracks(detections, detect_now)
 
         obstacle_th = 1.0 / max(float(CONFIG["YOLO_OBSTACLE_DIST_M"]), 0.4)
         bright_frac = _bright_fraction(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
@@ -1240,17 +1742,32 @@ def yolo_vision_action(image_b64: str) -> str:
         vision_state["last_right_val"] = round(float(lane_scores["RIGHT"]), 4)
         vision_state["last_nearest_distance_m"] = round(float(nearest_distance), 2) if nearest_distance is not None else None
         vision_state["last_detections"] = detections
+        vision_state["last_detections_held"] = detections_held
+        vision_state["last_detection_image_ts"] = float(frame_ts) if frame_ts else 0.0
+        vision_state["last_detection_server_ts"] = time.time()
         vision_state["last_lane_markings_visible"] = lane_markings_visible
+        if approach_det is not None:
+            vision_state["last_approach_hit"] = True
+            vision_state["last_approach_reason"] = (
+                f"APPROACH:{str(approach_det.get('label', 'obstacle')).upper()}@x"
+                f"{float(approach_det.get('approach_ratio') or 1.0):.2f}"
+            )
         front_blocking_det = _yolo_front_blocking_detection(
             detections,
             max_distance_m=CONFIG["YOLO_OBSTACLE_DIST_M"],
             require_distance=False,
         )
-        emergency_stop_det = _yolo_front_blocking_detection(
-            detections,
-            max_distance_m=CONFIG["YOLO_EMERGENCY_STOP_M"],
-            require_distance=True,
-        )
+        emergency_stop_det = None
+        if CONFIG["STOP_CONDITION"] == "A":
+            emergency_stop_det = _yolo_front_blocking_detection(
+                detections,
+                max_distance_m=CONFIG["YOLO_EMERGENCY_STOP_M"],
+                require_distance=True,
+            )
+        if center_occupancy_det is not None and front_blocking_det is None:
+            front_blocking_det = center_occupancy_det
+        if approach_det is not None and emergency_stop_det is None:
+            emergency_stop_det = approach_det
         vision_state["last_front_blocked"] = front_blocking_det is not None
         vision_state["last_emergency_stop"] = emergency_stop_det is not None
         vision_state["last_emergency_distance_m"] = (
@@ -1268,6 +1785,12 @@ def yolo_vision_action(image_b64: str) -> str:
                 vision_state["last_stop_reason"] = f"{prefix}:{label}"
             else:
                 vision_state["last_stop_reason"] = f"{prefix}:{label}@{float(dist_m):.1f}m"
+            if stop_det is approach_det and vision_state["last_approach_reason"]:
+                vision_state["last_stop_reason"] = vision_state["last_approach_reason"]
+            elif stop_det is center_occupancy_det:
+                vision_state["last_stop_reason"] = (
+                    f"{prefix}:{label}:AREA@{float(center_occupancy_det.get('area_ratio') or 0.0):.3f}"
+                )
         vision_state["detector_ready"] = True
         vision_state["detector_error"] = ""
         vision_state["last_vision_ts"] = time.time()
@@ -1282,7 +1805,7 @@ def yolo_vision_action(image_b64: str) -> str:
         return ""
 
 
-def _run_vision_pipeline(image_b64: str) -> Tuple[str, str, Optional[float]]:
+def _run_vision_pipeline(image_b64: str, frame_ts: Optional[float] = None) -> Tuple[str, str, Optional[float]]:
     if not image_b64:
         return "", "", None
     if CONFIG["VISION_MODE"] == "lite":
@@ -1305,7 +1828,26 @@ def _run_vision_pipeline(image_b64: str) -> Tuple[str, str, Optional[float]]:
         now = time.time()
         if (now - vision_state.get("last_yolo_ts", 0.0)) * 1000.0 >= CONFIG["YOLO_MIN_INTERVAL_MS"]:
             vision_state["last_yolo_ts"] = now
-            yolo_cmd = yolo_vision_action(image_b64)
+            yolo_cmd = yolo_vision_action(image_b64, frame_ts=frame_ts)
+            if (
+                CONFIG["YOLO_FLOW_FALLBACK"]
+                and (not vision_state.get("last_emergency_stop"))
+                and (
+                    not vision_state.get("detector_ready")
+                    or not (vision_state.get("last_detections") or [])
+                    or yolo_cmd == "FORWARD"
+                )
+            ):
+                fallback_reason = "no_detections" if not (vision_state.get("last_detections") or []) else "yolo_clear"
+                if not vision_state.get("detector_ready"):
+                    fallback_reason = "detector_unavailable"
+                if (now - vision_state.get("last_flow_ts", 0.0)) * 1000.0 >= CONFIG["FLOW_MIN_INTERVAL_MS"]:
+                    vision_state["last_flow_ts"] = now
+                    flow_cmd = flow_vision_action(image_b64)
+                    if flow_cmd and flow_cmd != "FORWARD":
+                        vision_state["last_yolo_fallback_used"] = True
+                        vision_state["last_yolo_fallback_reason"] = fallback_reason
+                        return flow_cmd, "vision_flow_fallback", None
             if yolo_cmd:
                 route = "vision_yolo_emergency_stop" if vision_state.get("last_emergency_stop") else "vision_yolo"
                 return yolo_cmd, route, None
@@ -1437,6 +1979,38 @@ else:
     vision_state["detector_error"] = yolo_error
     print("YOLO disabled or not available.")
 
+print("Loading Vision Depth (Depth Anything V2)...")
+depth_processor = None
+depth_model = None
+depth_error = ""
+if CONFIG["DEPTH_ANYTHING_ENABLED"] and AutoImageProcessor and AutoModelForDepthEstimation and torch and Image:
+    try:
+        depth_processor = AutoImageProcessor.from_pretrained(CONFIG["DEPTH_ANYTHING_MODEL"])
+        depth_model = AutoModelForDepthEstimation.from_pretrained(CONFIG["DEPTH_ANYTHING_MODEL"])
+        depth_model.eval()
+        if CONFIG["DEPTH_ANYTHING_DEVICE"] != "cpu":
+            depth_model.to(CONFIG["DEPTH_ANYTHING_DEVICE"])
+        vision_state["depth_ready"] = True
+    except Exception as exc:
+        depth_error = str(exc)
+        vision_state["depth_ready"] = False
+        vision_state["depth_error"] = depth_error
+        print("Warning: Depth Anything failed to load.", exc)
+else:
+    missing = []
+    if not CONFIG["DEPTH_ANYTHING_ENABLED"]:
+        missing.append("disabled")
+    if AutoImageProcessor is None or AutoModelForDepthEstimation is None:
+        missing.append("transformers_missing")
+    if torch is None:
+        missing.append("torch_missing")
+    if Image is None:
+        missing.append("pillow_missing")
+    depth_error = ",".join(missing) or "depth_anything_unavailable"
+    vision_state["depth_ready"] = False
+    vision_state["depth_error"] = depth_error
+    print("Depth Anything disabled or not available.")
+
 
 HTML_DASHBOARD = """
 <!DOCTYPE html>
@@ -1490,6 +2064,7 @@ HTML_DASHBOARD = """
         <div class="control-strip">
             <div class="status-chip" id="camera_chip" data-state="busy">CAM CHECKING</div>
             <button class="btn btn-blue btn-slim" id="camera_toggle" onclick="toggleCamera()">Camera</button>
+            <button class="btn btn-blue btn-slim" id="debug_toggle" onclick="openDebug()">Debug</button>
         </div>
     </div>
 
@@ -1698,7 +2273,13 @@ HTML_DASHBOARD = """
                     setTimeout(() => refreshCameraStatus(true), 450);
                 });
         }
+        function openDebug() {
+            window.open('/debug', '_blank');
+        }
         function getDetections(vd) {
+            if (vd && vd.detections_stale) {
+                return [];
+            }
             const detections = Array.isArray(vd && vd.detections) ? [...vd.detections] : [];
             detections.sort((a, b) => {
                 const da = typeof a.distance_m === 'number' ? a.distance_m : 999;
@@ -2437,6 +3018,7 @@ HTML_DASHBOARD = """
         let stateBusy = false;
         refreshCameraStatus(true);
         setInterval(() => refreshCameraStatus(false), 2500);
+        const statePollMs = 100;
         setInterval(() => {
             if (stateBusy) return;
             stateBusy = true;
@@ -2464,7 +3046,7 @@ HTML_DASHBOARD = """
                 drawSR(data.vision_debug || {}, data.latest_action, data.mode);
                 drawVideoOverlay(data.vision_debug || {});
             }).catch(() => {}).finally(() => { stateBusy = false; });
-        }, 140);
+        }, statePollMs);
     </script>
 </body>
 </html>
@@ -2474,6 +3056,17 @@ HTML_DASHBOARD = """
 @app.route("/")
 def index():
     return render_template_string(HTML_DASHBOARD)
+
+
+@app.route("/debug")
+def debug_page():
+    debug_path = Path(__file__).resolve().with_name("airpuff_calibration_debug.html")
+    if debug_path.is_file():
+        return send_file(str(debug_path))
+    return (
+        "<h3>Debug page not found</h3><p>Missing airpuff_calibration_debug.html beside airpuff_server.py</p>",
+        404,
+    )
 
 
 @app.route("/api/health", methods=["GET"])
@@ -2498,6 +3091,8 @@ def health():
                 "num_predict": CONFIG["OLLAMA_NUM_PREDICT"],
                 "chat_num_predict": CONFIG["CHAT_NUM_PREDICT"],
                 "keyword_fallback": CONFIG["ENABLE_KEYWORD_FALLBACK"],
+                "voice_wake_enabled": CONFIG["VOICE_WAKE_ENABLED"],
+                "voice_wake_words": CONFIG["VOICE_WAKE_WORDS"],
                 "autopilot_idle_sec": CONFIG["AUTOPILOT_IDLE_SEC"],
                 "autopilot_mode": CONFIG["AUTOPILOT_MODE"],
                 "vision_mode": CONFIG["VISION_MODE"],
@@ -2517,6 +3112,7 @@ def health():
                 "yolo_conf": CONFIG["YOLO_CONF"],
                 "yolo_obstacle_dist_m": CONFIG["YOLO_OBSTACLE_DIST_M"],
                 "yolo_emergency_stop_m": CONFIG["YOLO_EMERGENCY_STOP_M"],
+                "stop_condition": CONFIG["STOP_CONDITION"],
                 "yolo_detector_ready": vision_state.get("detector_ready"),
                 "scan_enabled": CONFIG["VISION_SCAN_ENABLED"],
                 "scan_duration_ms": CONFIG["VISION_SCAN_DURATION_MS"],
@@ -2583,7 +3179,36 @@ def get_state():
     if isinstance(existing_debug, dict):
         suggested_action = str(existing_debug.get("suggested_action") or "")
         suggested_route = str(existing_debug.get("suggested_route") or "")
-    snapshot["vision_debug"] = build_vision_debug(vision_action=suggested_action, vision_route=suggested_route)
+    vision_debug = build_vision_debug(vision_action=suggested_action, vision_route=suggested_route)
+    latest_image_ts = float(snapshot.get("latest_image_ts") or 0.0)
+    detections_image_ts = float(vision_debug.get("detections_image_ts") or 0.0)
+    detections_lag_ms: Optional[int] = None
+    detections_stale = False
+    if latest_image_ts and detections_image_ts:
+        lag_sec = latest_image_ts - detections_image_ts
+        detections_lag_ms = int(round(lag_sec * 1000.0))
+        if lag_sec > float(CONFIG["VISION_DET_SYNC_MAX_LAG_SEC"]) or lag_sec < -0.35:
+            detections_stale = True
+    elif latest_image_ts and (
+        vision_debug.get("detections")
+        or vision_debug.get("front_blocked")
+        or vision_debug.get("emergency_stop")
+        or vision_debug.get("nearest_distance_m") is not None
+    ):
+        detections_stale = True
+
+    if detections_stale:
+        vision_debug["detections"] = []
+        vision_debug["nearest_distance_m"] = None
+        vision_debug["lane_markings_visible"] = False
+        vision_debug["front_blocked"] = False
+        vision_debug["emergency_stop"] = False
+        vision_debug["emergency_stop_distance_m"] = None
+        vision_debug["stop_reason"] = "SYNC_STALE"
+
+    vision_debug["detections_sync_lag_ms"] = detections_lag_ms
+    vision_debug["detections_stale"] = detections_stale
+    snapshot["vision_debug"] = vision_debug
     snapshot["camera"] = _camera_status_snapshot()
     return jsonify(snapshot)
 
@@ -2594,6 +3219,8 @@ def sense():
     image_b64 = data.get("image", "") or ""
     audio_b64 = data.get("audio", "") or ""
     text_override = data.get("text", "") or ""
+    from_audio = bool(audio_b64 and not text_override)
+    image_ts = time.time() if image_b64 else 0.0
 
     with metrics_lock:
         metrics["requests_total"] += 1
@@ -2603,9 +3230,16 @@ def sense():
     if image_b64:
         with state_lock:
             state["latest_image"] = image_b64
-            state["latest_image_ts"] = time.time()
+            state["latest_image_ts"] = image_ts
 
     transcript = ""
+    transcript_raw = ""
+    wake_info: Dict[str, Any] = {
+        "required": bool(CONFIG["VOICE_WAKE_ENABLED"] and from_audio),
+        "hit": False,
+        "word": "",
+        "prompt_only": False,
+    }
     asr_ms_val = None
     llm_total_ms = None
     vlm_ms_val = None
@@ -2629,9 +3263,19 @@ def sense():
             with state_lock:
                 state["last_error"] = f"ASR error: {exc}"
 
-    if transcript:
-        with state_lock:
-            state["latest_transcript"] = transcript
+    transcript_raw = transcript
+    transcript, wake_info = apply_voice_wake_gate(transcript_raw, from_audio=from_audio)
+    wake_consumed_input = bool(transcript_raw) and (
+        (not wake_info["required"]) or bool(wake_info["hit"])
+    )
+
+    with state_lock:
+        state["latest_wake_hit"] = bool(wake_info["hit"])
+        state["latest_wake_word"] = str(wake_info["word"] or "")
+        state["latest_wake_required"] = bool(wake_info["required"])
+        if transcript_raw:
+            state["latest_transcript"] = transcript_raw
+        if wake_consumed_input:
             state["last_input_ts"] = time.time()
 
     action = "STOP"
@@ -2644,107 +3288,115 @@ def sense():
     vision_action = ""
     vision_route = ""
     if image_b64:
-        vision_action, vision_route, vision_vlm_ms = _run_vision_pipeline(image_b64)
+        vision_action, vision_route, vision_vlm_ms = _run_vision_pipeline(image_b64, frame_ts=image_ts)
         if vision_vlm_ms is not None:
             vlm_ms_val = vision_vlm_ms
 
     if current_mode == "MANUAL":
         action = manual_cmd
         route = "manual"
+        if wake_info["prompt_only"]:
+            chat_reply = "我在"
+            route = "manual_wake_ack"
         with state_lock:
             if action == "UP":
                 state["altitude_setpoint"] += 10
             elif action == "DOWN":
                 state["altitude_setpoint"] = max(0, state["altitude_setpoint"] - 10)
     else:
-        fast_cmd = ""
-        direct_chat = False
-        if transcript and CONFIG["ENABLE_KEYWORD_FALLBACK"]:
-            fast_cmd = fast_command_candidate(transcript)
-        if transcript and CONFIG["ENABLE_LLM"] and not fast_cmd:
-            direct_chat = direct_chat_candidate(transcript)
+        if wake_info["prompt_only"]:
+            action = "STOP"
+            chat_reply = "我在"
+            route = "wake_ack"
+        else:
+            fast_cmd = ""
+            direct_chat = False
+            if transcript and CONFIG["ENABLE_KEYWORD_FALLBACK"]:
+                fast_cmd = fast_command_candidate(transcript)
+            if transcript and CONFIG["ENABLE_LLM"] and not fast_cmd:
+                direct_chat = direct_chat_candidate(transcript)
 
-        if fast_cmd:
-            action = fast_cmd
-            chat_reply = "[Fast Command Route]"
-            route = "cmd_fast"
-            with metrics_lock:
-                metrics["fast_cmd_hits"] += 1
-        elif transcript and direct_chat and CONFIG["ENABLE_LLM"]:
-            try:
-                chat_prompt = build_chat_prompt(transcript)
-                chat_text, chat_ms = ask_chat(chat_prompt)
+            if fast_cmd:
+                action = fast_cmd
+                chat_reply = "[Fast Command Route]"
+                route = "cmd_fast"
                 with metrics_lock:
-                    metrics["llm_calls"] += 1
-                    metrics["llm_chat_calls"] += 1
-                record_latency("llm", chat_ms)
-                llm_total_ms = chat_ms if llm_total_ms is None else llm_total_ms + chat_ms
-                chat_reply = chat_text
-                remember_chat(transcript, chat_reply)
-                route = "chat_direct"
-            except Exception as exc:
-                with metrics_lock:
-                    metrics["errors"] += 1
-                with state_lock:
-                    state["last_error"] = f"Chat error: {exc}"
-        elif transcript and CONFIG["ENABLE_LLM"]:
-            try:
-                prompt = build_cmd_prompt(transcript)
-                ans, llm_ms = ask_llm(prompt, purpose="command")
-                with metrics_lock:
-                    metrics["llm_calls"] += 1
-                    metrics["llm_cmd_calls"] += 1
-                record_latency("llm", llm_ms)
-                llm_total_ms = llm_ms if llm_total_ms is None else llm_total_ms + llm_ms
-                parsed = safe_json_extract(ans)
-                if parsed.get("type") == "command":
-                    action = str(parsed.get("action", "STOP")).upper()
-                    chat_reply = "[Executing Voice Command]"
-                    route = "cmd_llm"
-                elif parsed.get("type") == "chat":
-                    action = "STOP"
-                    route = "chat_llm"
-                    try:
-                        chat_prompt = build_chat_prompt(transcript)
-                        chat_text, chat_ms = ask_chat(chat_prompt)
-                        with metrics_lock:
-                            metrics["llm_calls"] += 1
-                            metrics["llm_chat_calls"] += 1
-                        record_latency("llm", chat_ms)
-                        llm_total_ms = chat_ms if llm_total_ms is None else llm_total_ms + chat_ms
-                        chat_reply = chat_text or parsed.get("reply", "")
-                    except Exception:
-                        chat_reply = parsed.get("reply", "")
+                    metrics["fast_cmd_hits"] += 1
+            elif transcript and direct_chat and CONFIG["ENABLE_LLM"]:
+                try:
+                    chat_prompt = build_chat_prompt(transcript)
+                    chat_text, chat_ms = ask_chat(chat_prompt)
+                    with metrics_lock:
+                        metrics["llm_calls"] += 1
+                        metrics["llm_chat_calls"] += 1
+                    record_latency("llm", chat_ms)
+                    llm_total_ms = chat_ms if llm_total_ms is None else llm_total_ms + chat_ms
+                    chat_reply = chat_text
                     remember_chat(transcript, chat_reply)
-                elif CONFIG["ENABLE_KEYWORD_FALLBACK"]:
-                    fallback_cmd = keyword_command(transcript)
-                    if fallback_cmd:
-                        action = fallback_cmd
-                        route = "cmd_keyword_fallback"
-                        with metrics_lock:
-                            metrics["keyword_fallback_hits"] += 1
-            except Exception as exc:
-                with metrics_lock:
-                    metrics["errors"] += 1
-                with state_lock:
-                    state["last_error"] = f"LLM error: {exc}"
-                if CONFIG["ENABLE_KEYWORD_FALLBACK"]:
-                    fallback_cmd = keyword_command(transcript)
-                    if fallback_cmd:
-                        action = fallback_cmd
-                        route = "cmd_keyword_fallback"
-                        with metrics_lock:
-                            metrics["keyword_fallback_hits"] += 1
-        elif transcript and CONFIG["ENABLE_KEYWORD_FALLBACK"]:
-            fallback_cmd = keyword_command(transcript)
-            if fallback_cmd:
-                action = fallback_cmd
-                route = "cmd_keyword_only"
-                with metrics_lock:
-                    metrics["keyword_fallback_hits"] += 1
-        elif vision_action:
-            action = vision_action
-            route = vision_route
+                    route = "chat_direct"
+                except Exception as exc:
+                    with metrics_lock:
+                        metrics["errors"] += 1
+                    with state_lock:
+                        state["last_error"] = f"Chat error: {exc}"
+            elif transcript and CONFIG["ENABLE_LLM"]:
+                try:
+                    prompt = build_cmd_prompt(transcript)
+                    ans, llm_ms = ask_llm(prompt, purpose="command")
+                    with metrics_lock:
+                        metrics["llm_calls"] += 1
+                        metrics["llm_cmd_calls"] += 1
+                    record_latency("llm", llm_ms)
+                    llm_total_ms = llm_ms if llm_total_ms is None else llm_total_ms + llm_ms
+                    parsed = safe_json_extract(ans)
+                    if parsed.get("type") == "command":
+                        action = str(parsed.get("action", "STOP")).upper()
+                        chat_reply = "[Executing Voice Command]"
+                        route = "cmd_llm"
+                    elif parsed.get("type") == "chat":
+                        action = "STOP"
+                        route = "chat_llm"
+                        try:
+                            chat_prompt = build_chat_prompt(transcript)
+                            chat_text, chat_ms = ask_chat(chat_prompt)
+                            with metrics_lock:
+                                metrics["llm_calls"] += 1
+                                metrics["llm_chat_calls"] += 1
+                            record_latency("llm", chat_ms)
+                            llm_total_ms = chat_ms if llm_total_ms is None else llm_total_ms + chat_ms
+                            chat_reply = chat_text or parsed.get("reply", "")
+                        except Exception:
+                            chat_reply = parsed.get("reply", "")
+                        remember_chat(transcript, chat_reply)
+                    elif CONFIG["ENABLE_KEYWORD_FALLBACK"]:
+                        fallback_cmd = keyword_command(transcript)
+                        if fallback_cmd:
+                            action = fallback_cmd
+                            route = "cmd_keyword_fallback"
+                            with metrics_lock:
+                                metrics["keyword_fallback_hits"] += 1
+                except Exception as exc:
+                    with metrics_lock:
+                        metrics["errors"] += 1
+                    with state_lock:
+                        state["last_error"] = f"LLM error: {exc}"
+                    if CONFIG["ENABLE_KEYWORD_FALLBACK"]:
+                        fallback_cmd = keyword_command(transcript)
+                        if fallback_cmd:
+                            action = fallback_cmd
+                            route = "cmd_keyword_fallback"
+                            with metrics_lock:
+                                metrics["keyword_fallback_hits"] += 1
+            elif transcript and CONFIG["ENABLE_KEYWORD_FALLBACK"]:
+                fallback_cmd = keyword_command(transcript)
+                if fallback_cmd:
+                    action = fallback_cmd
+                    route = "cmd_keyword_only"
+                    with metrics_lock:
+                        metrics["keyword_fallback_hits"] += 1
+            elif vision_action:
+                action = vision_action
+                route = vision_route
 
         # Auto-wander when idle with no input
         with state_lock:
@@ -2784,6 +3436,7 @@ def sense():
 
     response = {
         "status": "ok",
+        "mode": current_mode,
         "action": action,
         "chat": chat_reply,
         "alt_setpoint": alt,
@@ -2791,6 +3444,12 @@ def sense():
         "llm_ms": round(llm_total_ms, 1) if llm_total_ms is not None else None,
         "vlm_ms": vlm_ms_val,
         "route": route,
+        "wake": {
+            "required": bool(wake_info["required"]),
+            "hit": bool(wake_info["hit"]),
+            "word": str(wake_info["word"] or ""),
+            "prompt_only": bool(wake_info["prompt_only"]),
+        },
         "server_ts": time.time(),
         "seq": seq,
     }
@@ -2805,6 +3464,7 @@ def sense():
         "asr_ms": response["asr_ms"],
         "llm_ms": response["llm_ms"],
         "vlm_ms": response["vlm_ms"],
+        "wake": response["wake"],
         "vision_mode": CONFIG["VISION_MODE"],
         "vision_debug": vision_debug,
     }

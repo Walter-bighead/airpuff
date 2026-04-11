@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SERVER="${1:-http://192.168.31.240:5000/api/sense}"
+SERVER="${1:-http://10.42.0.1:5000/api/sense}"
 SERIAL_PORT="${2:-/dev/ttyACM0}"
 ITERS="${ITERS:-30}"
 LOG_DIR="${AIRPUFF_TEST_LOG_DIR:-${HOME}/airpuff_logs}"

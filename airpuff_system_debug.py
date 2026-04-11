@@ -51,7 +51,7 @@ def check_esp32(port, baud):
 
 def main():
     parser = argparse.ArgumentParser(description="AirPuff system debug on Pi.")
-    parser.add_argument("--server", default="http://192.168.31.240:5000/api/sense")
+    parser.add_argument("--server", default="http://10.42.0.1:5000/api/sense")
     parser.add_argument("--serial", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--iters", type=int, default=5)

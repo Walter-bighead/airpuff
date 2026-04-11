@@ -7,7 +7,7 @@ After=network-online.target
 Type=simple
 User=walter
 WorkingDirectory=/home/walter/airpuff
-Environment=AIRPUFF_SENSE_URL=http://192.168.31.240:5000/api/sense
+Environment=AIRPUFF_SENSE_URL=http://10.42.0.1:5000/api/sense
 Environment=STREAM_WIDTH=1280
 Environment=STREAM_HEIGHT=720
 Environment=CAM_FPS=20
